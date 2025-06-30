@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Маршрут на карте</title>
+    <script src="https://api-maps.yandex.ru/2.1/?apikey=500f722a-45be-4d1c-a2a2-b66a2d2fd7af&lang=ru_RU" type="text/javascript"></script>
+    <style>
+        body { display: flex; }
+        #left-panel {
+            width: 250px;
+            padding: 10px;
+            font-family: sans-serif;
+        }
+        #map { flex-grow: 1; height: 600px; margin-left: 10px; }
+        #routeInfo { margin-top: 10px; padding: 5px; border: 1px solid #ccc; background: #f9f9f9; }
+    </style>
+</head>
+<body>
+<div id="left-panel">
+    <h3>Маршрут</h3>
+    <div>Количество контейнеров: <span id="containerCount">0</span></div>
+    <button onclick="buildRoute()">Построить маршрут</button><br><br>
+    <button onclick="exportJSON()">Экспорт в JSON</button><br><br>
+    <button onclick="clearAll()">Очистить контейнеры</button>
+    <input type="file" id="jsonFile" accept=".json" onchange="loadFromJSON(this)">
+
+    <div id="routeInfo">
+        <strong>Информация:</strong>
+        <div id="distance">Длина: -</div>
+        <div id="duration">Время: -</div>
+    </div>
+</div>
+<div id="map"></div>
+
+<script>
+    let map;
+    let points = [];
+    let geoObjects = [];
+
+    ymaps.ready(() => {
+        map = new ymaps.Map("map", {
+            center: [55.7558, 37.6176],
+            zoom: 5,
+            controls: ["trafficControl"]
+        });
+
+        map.events.add('click', function (e) {
+            const coords = e.get('coords');
+            addContainer(coords);
+        });
+    });
+
+    function updateContainerCount() {
+        document.getElementById('containerCount').innerText = points.length;
+    }
+
+    function addContainer(coords) {
+        const placemark = new ymaps.Placemark(coords, {
+            balloonContent: `Контейнер: ${coords[1].toFixed(5)}, ${coords[0].toFixed(5)}<br><em>Кликните для удаления</em>`
+        }, {
+            preset: 'islands#dotIcon',
+            iconColor: '#F00',
+            draggable: false
+        });
+
+        placemark.events.add('click', function () {
+            map.geoObjects.remove(placemark);
+            const index = geoObjects.indexOf(placemark);
+            if (index > -1) {
+                geoObjects.splice(index, 1);
+                points.splice(index, 1);
+                updateContainerCount();
+            }
+        });
+
+        map.geoObjects.add(placemark);
+        geoObjects.push(placemark);
+        points.push(coords);
+        updateContainerCount();
+    }
+
+    function buildRoute() {
+        if (points.length < 2) {
+            alert("Нужно как минимум 2 контейнера");
+            return;
+        }
+
+        map.geoObjects.removeAll();
+        geoObjects.forEach(obj => map.geoObjects.add(obj));
+
+        ymaps.route(points, {
+            mapStateAutoApply: true
+        }).then(function (route) {
+            map.geoObjects.add(route);
+
+            route.getPaths().options.set({
+                strokeColor: "#0000FF",
+                opacity: 0.9,
+                strokeWidth: 5
+            });
+
+            const distance = route.getLength();
+            const duration = route.getTime();
+
+            document.getElementById('distance').innerText = `Длина: ${(distance / 1000).toFixed(2)} км`;
+            document.getElementById('duration').innerText = `Время: ${Math.round(duration / 60)} мин`;
+
+            saveRoute(points);
+        }, function (error) {
+            alert("Ошибка построения маршрута: " + error.message);
+        });
+    }
+
+    function saveRoute(points) {
+        const payload = points.map(c => ({
+            latitude: c[1],
+            longitude: c[0]
+        }));
+
+        fetch('/api/route/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        }).then(r => {
+            if (r.ok) {
+                console.log("Маршрут успешно сохранён");
+            } else {
+                console.error("Ошибка сохранения маршрута");
+            }
+        });
+    }
+
+    function exportJSON() {
+        const payload = {
+            containers: points.map(c => ({
+                latitude: c[1],
+                longitude: c[0]
+            })),
+            distanceKm: document.getElementById('distance').innerText.replace('Длина: ', '').replace(' км', ''),
+            durationMin: document.getElementById('duration').innerText.replace('Время: ', '').replace(' мин', '')
+        };
+
+        // Локальная загрузка
+        const json = JSON.stringify(payload, null, 2);
+        const blob = new Blob([json], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = "route.json";
+        link.click();
+        URL.revokeObjectURL(url);
+
+        // Отправляем на бэкенд для сохранения в папку проекта
+        fetch('/api/route/export-json', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: json
+        }).then(r => {
+            if (r.ok) {
+                alert("JSON успешно сохранён в проекте");
+            } else {
+                alert("Ошибка сохранения JSON");
+            }
+        });
+    }
+    function loadFromJSON(input) {
+        const file = input.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function (e) {
+            const data = JSON.parse(e.target.result);
+            clearAll();
+
+            data.containers.forEach(c => {
+                addContainer([c.longitude, c.latitude]);
+            });
+
+            if (data.distanceKm && data.durationMin) {
+                document.getElementById('distance').innerText = `Длина: ${data.distanceKm} км`;
+                document.getElementById('duration').innerText = `Время: ${data.durationMin} мин`;
+            }
+        };
+        reader.readAsText(file);
+    }
+
+    function clearAll() {
+        map.geoObjects.removeAll();
+        geoObjects = [];
+        points = [];
+        updateContainerCount();
+        document.getElementById('distance').innerText = 'Длина: -';
+        document.getElementById('duration').innerText = 'Время: -';
+    }
+</script>
+</body>
+</html>
